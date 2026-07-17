@@ -49,36 +49,61 @@ DISABLE = os.environ.get("ZUNDA_DISABLE", "").strip().lower() not in ("", "0", "
 
 
 def last_assistant_text(transcript_path):
-    text = None
+    """最新ターン（最後のユーザー手入力以降）の assistant テキストから読み上げ元を選ぶ。
+    <speak> を含むものを最優先（ツール実行前の前置きに引っ張られないため）。
+    無ければ現ターン最後のテキスト。現ターンに assistant テキストが無ければ None。"""
     try:
+        events = []
         with open(transcript_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    ev = json.loads(line)
+                    events.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
-                if ev.get("type") != "assistant":
-                    continue
-                content = ev.get("message", {}).get("content", [])
-                parts = [
-                    c.get("text", "")
-                    for c in content
-                    if isinstance(c, dict) and c.get("type") == "text"
-                ]
-                joined = "".join(parts).strip()
-                if joined:
-                    text = joined  # 最後のものを残す
     except FileNotFoundError:
         return None
-    return text
+
+    # 現ターン開始位置＝最後の「ユーザー手入力」(content が非空の文字列)。
+    # tool_result は content がリストなので境界にならない。
+    start = 0
+    for i, ev in enumerate(events):
+        if ev.get("type") == "user":
+            c = ev.get("message", {}).get("content")
+            if isinstance(c, str) and c.strip():
+                start = i
+
+    texts = []
+    for ev in events[start:]:
+        if ev.get("type") != "assistant":
+            continue
+        content = ev.get("message", {}).get("content", [])
+        joined = "".join(
+            c.get("text", "")
+            for c in content
+            if isinstance(c, dict) and c.get("type") == "text"
+        ).strip()
+        if joined:
+            texts.append(joined)
+
+    if not texts:
+        return None
+    # 完全な <speak>…</speak> ブロックを含む最後のテキストを最優先。
+    # 単に本文中で "<speak>" に言及しただけの前置き（閉じタグ無し）は拾わない。
+    for t in reversed(texts):
+        if re.search(r"<speak>.*?</speak>", t, re.DOTALL):
+            return t
+    return texts[-1]
 
 
 def clean(text):
-    # <speak>...</speak> があれば最優先でその中身だけ
-    m = re.findall(r"<speak>(.*?)</speak>", text, re.DOTALL)
+    # <speak>...</speak> があれば最優先でその中身だけ。
+    # 本文が "<speak>" に言及しただけの箇所（例: `<speak>` という説明）に開きタグが
+    # 引っかかって本物の閉じタグまで丸ごと拾うのを防ぐため、内部に別の <speak> を
+    # 含まない最短ブロックだけを本物と見なす。
+    m = re.findall(r"<speak>((?:(?!<speak>).)*?)</speak>", text, re.DOTALL)
     if m:
         spoken = re.sub(r"\s+", " ", m[-1]).strip()
         # 暴走読み上げ防止に総量だけ上限を設ける（チャンク分割は別途）

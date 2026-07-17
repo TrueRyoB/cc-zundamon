@@ -58,7 +58,21 @@ Claude に毎回付けさせたい場合は、`~/.claude/CLAUDE.md` に例えば
 | `ZUNDA_SAY_RATE` | `210` | フォールバック `say` の rate（実際は ×`ZUNDA_SPEED`） |
 | `ZUNDA_DISABLE` | （未設定） | 立てるとナレーター無効。ヘッドレス/バッチ実行で使う |
 
-環境変数は `~/.claude/settings.json` の `env` などで設定できます。
+環境変数は `~/.claude/settings.json` の `env` などで設定できます。例:
+
+```json
+{ "env": { "ZUNDA_SPEAKER": "14", "ZUNDA_SPEED": "1.2" } }
+```
+
+### 声を変える
+
+`ZUNDA_SPEAKER` に VOICEVOX の style ID を指定します（既定 `3` = ずんだもん）。使える話者と ID は engine から取得できます:
+
+```sh
+curl -s http://localhost:50021/speakers | python3 -c 'import json,sys; [print(st["id"], sp["name"], st["name"]) for sp in json.load(sys.stdin) for st in sp["styles"]]'
+```
+
+例: `冥鳴ひまり` ノーマル = `14`。
 
 ### ヘッドレス/バッチで黙らせる
 
