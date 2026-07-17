@@ -24,7 +24,11 @@
     ZUNDA_SAY_VOICE (フォールバック用, 既定: Kyoko)
     ZUNDA_SAY_RATE  (フォールバック用, 既定: 210。実際の rate は ×ZUNDA_SPEED)
     ZUNDA_DISABLE   (立てるとナレーター無効。ヘッドレス/バッチ実行時に使う)
+    ZUNDA_MIC_MUTE  (既定: 有効。マイク使用中(音声入力中など)は読み上げをスキップ。
+                     0/false/no/off で無効化＝マイク中でも読み上げる)
 """
+import ctypes
+import ctypes.util
 import json
 import os
 import re
@@ -46,6 +50,66 @@ SAY_RATE = os.environ.get("ZUNDA_SAY_RATE", "210")
 SPEED = float(os.environ.get("ZUNDA_SPEED", "1.2"))
 # ナレーター無効化スイッチ。ヘッドレス/バッチ実行では ZUNDA_DISABLE=1 を立てて黙らせる。
 DISABLE = os.environ.get("ZUNDA_DISABLE", "").strip().lower() not in ("", "0", "false", "no", "off")
+# マイク使用中はミュートするか。既定 ON。VOICEVOX/say の再生音がマイクに回り込む
+# （音声入力にナレーターの声が混入する）のを防ぐ。明示的に 0/false/no/off で無効化。
+MIC_MUTE = os.environ.get("ZUNDA_MIC_MUTE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
+def _fourcc(s):
+    """4文字コード -> CoreAudio の UInt32 セレクタ。"""
+    return (ord(s[0]) << 24) | (ord(s[1]) << 16) | (ord(s[2]) << 8) | ord(s[3])
+
+
+class _AudioObjectPropertyAddress(ctypes.Structure):
+    _fields_ = [
+        ("mSelector", ctypes.c_uint32),
+        ("mScope", ctypes.c_uint32),
+        ("mElement", ctypes.c_uint32),
+    ]
+
+
+def mic_in_use():
+    """デフォルト入力デバイス（マイク）が今どこかのプロセスで稼働中かを返す。
+    CoreAudio の kAudioDevicePropertyDeviceIsRunningSomewhere を ctypes で参照する
+    （標準ライブラリのみ・追加パッケージ不要）。判定できない環境では False を返す
+    ＝フェイルオープン（検出失敗でナレーターを黙らせない）。macOS 前提。"""
+    kAudioObjectSystemObject = 1
+    default_input = _fourcc("dIn ")            # kAudioHardwarePropertyDefaultInputDevice
+    running_somewhere = _fourcc("gone")        # kAudioDevicePropertyDeviceIsRunningSomewhere
+    scope_global = _fourcc("glob")             # kAudioObjectPropertyScopeGlobal
+    element_main = 0                           # kAudioObjectPropertyElementMain
+    try:
+        lib = ctypes.util.find_library("CoreAudio") or (
+            "/System/Library/Frameworks/CoreAudio.framework/CoreAudio"
+        )
+        ca = ctypes.CDLL(lib)
+        get = ca.AudioObjectGetPropertyData
+
+        # 1) デフォルト入力デバイス ID を取得
+        dev = ctypes.c_uint32(0)
+        size = ctypes.c_uint32(ctypes.sizeof(dev))
+        addr = _AudioObjectPropertyAddress(default_input, scope_global, element_main)
+        st = get(
+            ctypes.c_uint32(kAudioObjectSystemObject),
+            ctypes.byref(addr), ctypes.c_uint32(0), None,
+            ctypes.byref(size), ctypes.byref(dev),
+        )
+        if st != 0 or dev.value == 0:
+            return False
+
+        # 2) そのデバイスが「どこかで稼働中」か（=マイク使用中）
+        running = ctypes.c_uint32(0)
+        size2 = ctypes.c_uint32(ctypes.sizeof(running))
+        addr2 = _AudioObjectPropertyAddress(running_somewhere, scope_global, element_main)
+        st2 = get(
+            dev, ctypes.byref(addr2), ctypes.c_uint32(0), None,
+            ctypes.byref(size2), ctypes.byref(running),
+        )
+        if st2 != 0:
+            return False
+        return running.value != 0
+    except Exception:
+        return False
 
 
 def last_assistant_text(transcript_path):
@@ -274,6 +338,11 @@ def main():
         return
     spoken = clean(raw)
     if not spoken:
+        return
+
+    # マイク使用中（音声入力中など）はミュート。再生音がマイクに回り込むのを防ぐ。
+    # 判定できない環境では mic_in_use() が False を返す＝いつも通り読み上げる。
+    if MIC_MUTE and mic_in_use():
         return
 
     # 音声処理はワーカーに切り離し、フック本体は即座に返す
